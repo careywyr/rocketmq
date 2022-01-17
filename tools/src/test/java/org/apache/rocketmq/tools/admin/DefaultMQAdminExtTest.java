@@ -16,24 +16,13 @@
  */
 package org.apache.rocketmq.tools.admin;
 
-import java.io.UnsupportedEncodingException;
-import java.lang.reflect.Field;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-import java.util.concurrent.ConcurrentHashMap;
 import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.impl.MQClientAPIImpl;
 import org.apache.rocketmq.client.impl.MQClientManager;
 import org.apache.rocketmq.client.impl.factory.MQClientInstance;
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.admin.ConsumeStats;
 import org.apache.rocketmq.common.admin.OffsetWrapper;
@@ -70,21 +59,44 @@ import org.apache.rocketmq.remoting.exception.RemotingException;
 import org.apache.rocketmq.remoting.exception.RemotingSendRequestException;
 import org.apache.rocketmq.remoting.exception.RemotingTimeoutException;
 import org.apache.rocketmq.tools.admin.api.MessageTrack;
+import org.assertj.core.util.Maps;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
 public class DefaultMQAdminExtTest {
+    private static final String broker1Addr = "127.0.0.1:10911";
+    private static final String broker1Name = "default-broker";
+    private static final String cluster = "default-cluster";
+    private static final String broker2Name = "broker-test";
+    private static final String broker2Addr = "127.0.0.2:10911";
+    private static final String topic1 = "topic_one";
+    private static final String topic2 = "topic_two";
     private static DefaultMQAdminExt defaultMQAdminExt;
     private static DefaultMQAdminExtImpl defaultMQAdminExtImpl;
     private static MQClientInstance mqClientInstance = MQClientManager.getInstance().getOrCreateMQClientInstance(new ClientConfig());
@@ -117,33 +129,34 @@ public class DefaultMQAdminExtTest {
         when(mQClientAPIImpl.getBrokerConfig(anyString(), anyLong())).thenReturn(properties);
 
         Set<String> topicSet = new HashSet<>();
-        topicSet.add("topic_one");
-        topicSet.add("topic_two");
+        topicSet.add(topic1);
+        topicSet.add(topic2);
         topicList.setTopicList(topicSet);
         when(mQClientAPIImpl.getTopicListFromNameServer(anyLong())).thenReturn(topicList);
 
         List<BrokerData> brokerDatas = new ArrayList<>();
         HashMap<Long, String> brokerAddrs = new HashMap<>();
-        brokerAddrs.put(1234l, "127.0.0.1:10911");
+        brokerAddrs.put(MixAll.MASTER_ID, broker1Addr);
         BrokerData brokerData = new BrokerData();
-        brokerData.setCluster("default-cluster");
-        brokerData.setBrokerName("default-broker");
+        brokerData.setCluster(cluster);
+        brokerData.setBrokerName(broker1Name);
         brokerData.setBrokerAddrs(brokerAddrs);
         brokerDatas.add(brokerData);
+        brokerDatas.add(new BrokerData(cluster, broker2Name, (HashMap<Long, String>) Maps.newHashMap(MixAll.MASTER_ID, broker2Addr)));
         topicRouteData.setBrokerDatas(brokerDatas);
         topicRouteData.setQueueDatas(new ArrayList<QueueData>());
         topicRouteData.setFilterServerTable(new HashMap<String, List<String>>());
         when(mQClientAPIImpl.getTopicRouteInfoFromNameServer(anyString(), anyLong())).thenReturn(topicRouteData);
 
         HashMap<String, String> result = new HashMap<>();
-        result.put("id", "1234");
-        result.put("brokerName", "default-broker");
+        result.put("id", String.valueOf(MixAll.MASTER_ID));
+        result.put("brokerName", broker1Name);
         kvTable.setTable(result);
         when(mQClientAPIImpl.getBrokerRuntimeInfo(anyString(), anyLong())).thenReturn(kvTable);
 
         HashMap<String, BrokerData> brokerAddrTable = new HashMap<>();
-        brokerAddrTable.put("default-broker", brokerData);
-        brokerAddrTable.put("broker-test", new BrokerData());
+        brokerAddrTable.put(broker1Name, brokerData);
+        brokerAddrTable.put(broker2Name, new BrokerData());
         clusterInfo.setBrokerAddrTable(brokerAddrTable);
         clusterInfo.setClusterAddrTable(new HashMap<String, Set<String>>());
         when(mQClientAPIImpl.getBrokerClusterInfo(anyLong())).thenReturn(clusterInfo);
@@ -262,7 +275,7 @@ public class DefaultMQAdminExtTest {
     @Test
     public void testFetchBrokerRuntimeStats() throws InterruptedException, MQBrokerException, RemotingTimeoutException, RemotingSendRequestException, RemotingConnectException {
         KVTable brokerStats = defaultMQAdminExt.fetchBrokerRuntimeStats("127.0.0.1:10911");
-        assertThat(brokerStats.getTable().get("id")).isEqualTo("1234");
+        assertThat(brokerStats.getTable().get("id")).isEqualTo(String.valueOf(MixAll.MASTER_ID));
         assertThat(brokerStats.getTable().get("brokerName")).isEqualTo("default-broker");
     }
 
@@ -288,7 +301,7 @@ public class DefaultMQAdminExtTest {
     @Test
     public void testExamineConsumeStats() throws InterruptedException, RemotingException, MQClientException, MQBrokerException {
         ConsumeStats consumeStats = defaultMQAdminExt.examineConsumeStats("default-consumer-group", "unit-test");
-        assertThat(consumeStats.getConsumeTps()).isEqualTo(1234);
+        assertThat(consumeStats.getConsumeTps()).isGreaterThanOrEqualTo(1234);
     }
 
     @Test
@@ -422,6 +435,34 @@ public class DefaultMQAdminExtTest {
         assertThat(subscriptionGroupWrapper.getSubscriptionGroupTable().get("Consumer-group-one").getBrokerId()).isEqualTo(1234);
         assertThat(subscriptionGroupWrapper.getSubscriptionGroupTable().get("Consumer-group-one").getGroupName()).isEqualTo("Consumer-group-one");
         assertThat(subscriptionGroupWrapper.getSubscriptionGroupTable().get("Consumer-group-one").isConsumeBroadcastEnable()).isTrue();
+    }
+
+    @Test
+    public void testMaxOffset() throws Exception {
+        when(mQClientAPIImpl.getMaxOffset(anyString(), anyString(), anyInt(), anyBoolean(), anyBoolean(), anyLong())).thenReturn(100L);
+
+        assertThat(defaultMQAdminExt.maxOffset(new MessageQueue(topic1, broker1Name, 0))).isEqualTo(100L);
+    }
+
+    @Test
+    public void testSearchOffset() throws Exception {
+        when(mQClientAPIImpl.searchOffset(anyString(), anyString(), anyInt(), anyLong(), anyLong())).thenReturn(101L);
+
+        assertThat(defaultMQAdminExt.searchOffset(new MessageQueue(topic1, broker1Name, 0), System.currentTimeMillis())).isEqualTo(101L);
+    }
+
+    @Test
+    public void testMaxOffset_LogicalQueue() throws Exception {
+        when(mQClientAPIImpl.getMaxOffset(eq(broker2Addr), anyString(), anyInt(), anyBoolean(), anyBoolean(), anyLong())).thenReturn(10L);
+
+        assertThat(defaultMQAdminExt.maxOffset(new MessageQueue(topic1, MixAll.LOGICAL_QUEUE_MOCK_BROKER_NAME, 0))).isEqualTo(1010L);
+    }
+
+    @Test
+    public void testSearchOffset_LogicalQueue() throws Exception {
+        when(mQClientAPIImpl.searchOffset(eq(broker2Addr), anyString(), anyInt(), anyLong(), anyLong())).thenReturn(11L);
+
+        assertThat(defaultMQAdminExt.searchOffset(new MessageQueue(topic1, MixAll.LOGICAL_QUEUE_MOCK_BROKER_NAME, 0), System.currentTimeMillis())).isEqualTo(1011L);
     }
 
     @Test

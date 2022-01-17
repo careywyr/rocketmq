@@ -18,6 +18,7 @@ package org.apache.rocketmq.client.impl.factory;
 
 import java.io.UnsupportedEncodingException;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -35,7 +36,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.admin.MQAdminExtInner;
@@ -64,6 +64,7 @@ import org.apache.rocketmq.common.ServiceState;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.constant.PermName;
 import org.apache.rocketmq.common.filter.ExpressionType;
+import org.apache.rocketmq.common.message.MessageQueueAssignment;
 import org.apache.rocketmq.common.protocol.NamespaceUtil;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -73,6 +74,7 @@ import org.apache.rocketmq.common.protocol.body.ConsumerRunningInfo;
 import org.apache.rocketmq.common.protocol.heartbeat.ConsumeType;
 import org.apache.rocketmq.common.protocol.heartbeat.ConsumerData;
 import org.apache.rocketmq.common.protocol.heartbeat.HeartbeatData;
+import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
 import org.apache.rocketmq.common.protocol.heartbeat.ProducerData;
 import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.common.protocol.route.BrokerData;
@@ -84,9 +86,11 @@ import org.apache.rocketmq.remoting.exception.RemotingException;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
+import static org.apache.rocketmq.common.rpc.ClientMetadata.topicRouteData2EndpointsForStaticTopic;
+
 public class MQClientInstance {
     private final static long LOCK_TIMEOUT_MILLIS = 3000;
-    private final InternalLogger log = ClientLogger.getLog();
+    private final static InternalLogger log = ClientLogger.getLog();
     private final ClientConfig clientConfig;
     private final int instanceIndex;
     private final String clientId;
@@ -98,6 +102,7 @@ public class MQClientInstance {
     private final MQClientAPIImpl mQClientAPIImpl;
     private final MQAdminImpl mQAdminImpl;
     private final ConcurrentMap<String/* Topic */, TopicRouteData> topicRouteTable = new ConcurrentHashMap<String, TopicRouteData>();
+    private final ConcurrentMap<String/* Topic */, ConcurrentMap<MessageQueue, String/*brokerName*/>> topicEndPointsTable = new ConcurrentHashMap<>();
     private final Lock lockNamesrv = new ReentrantLock();
     private final Lock lockHeartbeat = new ReentrantLock();
     private final ConcurrentMap<String/* Broker Name */, HashMap<Long/* brokerId */, String/* address */>> brokerAddrTable =
@@ -157,8 +162,12 @@ public class MQClientInstance {
             MQVersion.getVersionDesc(MQVersion.CURRENT_VERSION), RemotingCommand.getSerializeTypeConfigInThisServer());
     }
 
+
+
+
     public static TopicPublishInfo topicRouteData2TopicPublishInfo(final String topic, final TopicRouteData route) {
         TopicPublishInfo info = new TopicPublishInfo();
+        // TODO should check the usage of raw route, it is better to remove such field
         info.setTopicRouteData(route);
         if (route.getOrderTopicConf() != null && route.getOrderTopicConf().length() > 0) {
             String[] brokers = route.getOrderTopicConf().split(";");
@@ -172,6 +181,17 @@ public class MQClientInstance {
             }
 
             info.setOrderTopic(true);
+        } else if (route.getOrderTopicConf() == null
+                && route.getTopicQueueMappingByBroker() != null
+                && !route.getTopicQueueMappingByBroker().isEmpty()) {
+            info.setOrderTopic(false);
+            ConcurrentMap<MessageQueue, String> mqEndPoints = topicRouteData2EndpointsForStaticTopic(topic, route);
+            info.getMessageQueueList().addAll(mqEndPoints.keySet());
+            Collections.sort(info.getMessageQueueList(), new Comparator<MessageQueue>() {
+                @Override public int compare(MessageQueue o1, MessageQueue o2) {
+                    return MixAll.compareInteger(o1.getQueueId(), o2.getQueueId());
+                }
+            });
         } else {
             List<QueueData> qds = route.getQueueDatas();
             Collections.sort(qds);
@@ -208,6 +228,11 @@ public class MQClientInstance {
 
     public static Set<MessageQueue> topicRouteData2TopicSubscribeInfo(final String topic, final TopicRouteData route) {
         Set<MessageQueue> mqList = new HashSet<MessageQueue>();
+        if (route.getTopicQueueMappingByBroker() != null
+                && !route.getTopicQueueMappingByBroker().isEmpty()) {
+            ConcurrentMap<MessageQueue, String> mqEndPoints = topicRouteData2EndpointsForStaticTopic(topic, route);
+            return mqEndPoints.keySet();
+        }
         List<QueueData> qds = route.getQueueDatas();
         for (QueueData qd : qds) {
             if (PermName.isReadable(qd.getPerm())) {
@@ -631,10 +656,17 @@ public class MQClientInstance {
                         }
 
                         if (changed) {
-                            TopicRouteData cloneTopicRouteData = topicRouteData.cloneTopicRouteData();
 
                             for (BrokerData bd : topicRouteData.getBrokerDatas()) {
                                 this.brokerAddrTable.put(bd.getBrokerName(), bd.getBrokerAddrs());
+                            }
+
+                            // Update endpoint map
+                            {
+                                ConcurrentMap<MessageQueue, String> mqEndPoints = topicRouteData2EndpointsForStaticTopic(topic, topicRouteData);
+                                if (mqEndPoints != null && !mqEndPoints.isEmpty()) {
+                                    topicEndPointsTable.put(topic, mqEndPoints);
+                                }
                             }
 
                             // Update Pub info
@@ -663,6 +695,7 @@ public class MQClientInstance {
                                     }
                                 }
                             }
+                            TopicRouteData cloneTopicRouteData =  new TopicRouteData(topicRouteData);
                             log.info("topicRouteTable.put. Topic = {}, TopicRouteData[{}]", topic, cloneTopicRouteData);
                             this.topicRouteTable.put(topic, cloneTopicRouteData);
                             return true;
@@ -789,8 +822,8 @@ public class MQClientInstance {
     private boolean topicRouteDataIsChange(TopicRouteData olddata, TopicRouteData nowdata) {
         if (olddata == null || nowdata == null)
             return true;
-        TopicRouteData old = olddata.cloneTopicRouteData();
-        TopicRouteData now = nowdata.cloneTopicRouteData();
+        TopicRouteData old = new TopicRouteData(olddata);
+        TopicRouteData now = new TopicRouteData(nowdata);
         Collections.sort(old.getQueueDatas());
         Collections.sort(old.getBrokerDatas());
         Collections.sort(now.getQueueDatas());
@@ -810,6 +843,10 @@ public class MQClientInstance {
                     result = impl.isPublishTopicNeedUpdate(topic);
                 }
             }
+        }
+
+        if (result) {
+            return true;
         }
 
         {
@@ -896,11 +933,7 @@ public class MQClientInstance {
                         try {
                             this.mQClientAPIImpl.unregisterClient(addr, this.clientId, producerGroup, consumerGroup, clientConfig.getMqClientApiTimeout());
                             log.info("unregister client[Producer: {} Consumer: {}] from broker[{} {} {}] success", producerGroup, consumerGroup, brokerName, entry1.getKey(), addr);
-                        } catch (RemotingException e) {
-                            log.error("unregister client exception from broker: " + addr, e);
-                        } catch (InterruptedException e) {
-                            log.error("unregister client exception from broker: " + addr, e);
-                        } catch (MQBrokerException e) {
+                        } catch (RemotingException | InterruptedException | MQBrokerException e) {
                             log.error("unregister client exception from broker: " + addr, e);
                         }
                     }
@@ -946,6 +979,19 @@ public class MQClientInstance {
         this.adminExtTable.remove(group);
     }
 
+    public void rebalanceLater(long delayMillis) {
+        if (delayMillis <= 0) {
+            this.rebalanceService.wakeup();
+        } else {
+            this.scheduledExecutorService.schedule(new Runnable() {
+                @Override
+                public void run() {
+                    MQClientInstance.this.rebalanceService.wakeup();
+                }
+            }, delayMillis, TimeUnit.MILLISECONDS);
+        }
+    }
+
     public void rebalanceImmediately() {
         this.rebalanceService.wakeup();
     }
@@ -971,7 +1017,20 @@ public class MQClientInstance {
         return this.consumerTable.get(group);
     }
 
+
+    public String getBrokerNameFromMessageQueue(final MessageQueue mq) {
+        if (topicEndPointsTable.get(mq.getTopic()) != null
+            && !topicEndPointsTable.get(mq.getTopic()).isEmpty()) {
+            return topicEndPointsTable.get(mq.getTopic()).get(mq);
+        }
+        return mq.getBrokerName();
+    }
+
+
     public FindBrokerResult findBrokerAddressInAdmin(final String brokerName) {
+        if (brokerName == null) {
+            return null;
+        }
         String brokerAddr = null;
         boolean slave = false;
         boolean found = false;
@@ -1001,7 +1060,11 @@ public class MQClientInstance {
         return null;
     }
 
+
     public String findBrokerAddressInPublish(final String brokerName) {
+        if (brokerName == null) {
+            return null;
+        }
         HashMap<Long/* brokerId */, String/* address */> map = this.brokerAddrTable.get(brokerName);
         if (map != null && !map.isEmpty()) {
             return map.get(MixAll.MASTER_ID);
@@ -1010,11 +1073,15 @@ public class MQClientInstance {
         return null;
     }
 
+
     public FindBrokerResult findBrokerAddressInSubscribe(
         final String brokerName,
         final long brokerId,
         final boolean onlyThisBroker
     ) {
+        if (brokerName == null) {
+            return null;
+        }
         String brokerAddr = null;
         boolean slave = false;
         boolean found = false;
@@ -1045,7 +1112,7 @@ public class MQClientInstance {
         return null;
     }
 
-    public int findBrokerVersion(String brokerName, String brokerAddr) {
+    private int findBrokerVersion(String brokerName, String brokerAddr) {
         if (this.brokerVersionTable.containsKey(brokerName)) {
             if (this.brokerVersionTable.get(brokerName).containsKey(brokerAddr)) {
                 return this.brokerVersionTable.get(brokerName).get(brokerAddr);
@@ -1068,6 +1135,22 @@ public class MQClientInstance {
             } catch (Exception e) {
                 log.warn("getConsumerIdListByGroup exception, " + brokerAddr + " " + group, e);
             }
+        }
+
+        return null;
+    }
+
+    public Set<MessageQueueAssignment> queryAssignment(final String topic, final String consumerGroup, final String strategyName, final MessageModel messageModel, int timeout)
+        throws RemotingException, InterruptedException, MQBrokerException {
+        String brokerAddr = this.findBrokerAddrByTopic(topic);
+        if (null == brokerAddr) {
+            this.updateTopicRouteInfoFromNameServer(topic);
+            brokerAddr = this.findBrokerAddrByTopic(topic);
+        }
+
+        if (null != brokerAddr) {
+            return this.mQClientAPIImpl.queryAssignment(brokerAddr, topic, consumerGroup, clientId,  strategyName,
+                messageModel, timeout);
         }
 
         return null;
@@ -1230,5 +1313,14 @@ public class MQClientInstance {
 
     public ClientConfig getClientConfig() {
         return clientConfig;
+    }
+
+    public TopicRouteData queryTopicRouteData(String topic) {
+        TopicRouteData data = this.getAnExistTopicRouteData(topic);
+        if (data == null) {
+            this.updateTopicRouteInfoFromNameServer(topic);
+            data = this.getAnExistTopicRouteData(topic);
+        }
+        return data;
     }
 }

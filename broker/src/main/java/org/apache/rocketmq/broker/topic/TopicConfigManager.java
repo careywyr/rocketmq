@@ -364,7 +364,7 @@ public class TopicConfigManager extends ConfigManager {
 
         this.dataVersion.nextVersion();
 
-        this.persist();
+        this.persist(topicConfig.getTopicName(), topicConfig);
     }
 
     public void updateOrderTopicConfig(final KVTable orderKVTableFromNs) {

@@ -17,11 +17,15 @@
 package org.apache.rocketmq.broker.processor;
 
 import com.google.common.collect.Sets;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import org.apache.rocketmq.broker.BrokerController;
+import org.apache.rocketmq.broker.topic.TopicConfigManager;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.MixAll;
+import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.TopicFilterType;
+import org.apache.rocketmq.common.TopicQueueId;
 import org.apache.rocketmq.common.constant.PermName;
 import org.apache.rocketmq.common.message.MessageAccessor;
 import org.apache.rocketmq.common.message.MessageConst;
@@ -30,6 +34,7 @@ import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.common.protocol.header.CreateTopicRequestHeader;
 import org.apache.rocketmq.common.protocol.header.DeleteTopicRequestHeader;
+import org.apache.rocketmq.common.protocol.header.GetTopicConfigRequestHeader;
 import org.apache.rocketmq.common.protocol.header.ResumeCheckHalfMessageRequestHeader;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
@@ -52,12 +57,16 @@ import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Set;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.LongAdder;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
@@ -68,32 +77,51 @@ public class AdminBrokerProcessorTest {
     @Mock
     private ChannelHandlerContext handlerContext;
 
+    @Mock
+    private Channel channel;
+
     @Spy
     private BrokerController
-            brokerController = new BrokerController(new BrokerConfig(), new NettyServerConfig(), new NettyClientConfig(),
-            new MessageStoreConfig());
+        brokerController = new BrokerController(new BrokerConfig(), new NettyServerConfig(), new NettyClientConfig(),
+        new MessageStoreConfig());
 
     @Mock
     private MessageStore messageStore;
 
+    @Mock
+    private SendMessageProcessor sendMessageProcessor;
+
+    @Mock
+    private ConcurrentMap<TopicQueueId, LongAdder> inFlyWritingCouterMap;
+
     private Set<String> systemTopicSet;
+    private String topic;
 
     @Before
-    public void init() {
+    public void init() throws Exception {
         brokerController.setMessageStore(messageStore);
+
+        doReturn(sendMessageProcessor).when(brokerController).getSendMessageProcessor();
+
         adminBrokerProcessor = new AdminBrokerProcessor(brokerController);
 
         systemTopicSet = Sets.newHashSet(
-                TopicValidator.RMQ_SYS_SELF_TEST_TOPIC,
-                TopicValidator.RMQ_SYS_BENCHMARK_TOPIC,
-                TopicValidator.RMQ_SYS_SCHEDULE_TOPIC,
-                TopicValidator.RMQ_SYS_OFFSET_MOVED_EVENT,
-                TopicValidator.AUTO_CREATE_TOPIC_KEY_TOPIC,
-                this.brokerController.getBrokerConfig().getBrokerClusterName(),
-                this.brokerController.getBrokerConfig().getBrokerClusterName() + "_" + MixAll.REPLY_TOPIC_POSTFIX);
+            TopicValidator.RMQ_SYS_SELF_TEST_TOPIC,
+            TopicValidator.RMQ_SYS_BENCHMARK_TOPIC,
+            TopicValidator.RMQ_SYS_SCHEDULE_TOPIC,
+            TopicValidator.RMQ_SYS_OFFSET_MOVED_EVENT,
+            TopicValidator.AUTO_CREATE_TOPIC_KEY_TOPIC,
+            this.brokerController.getBrokerConfig().getBrokerClusterName(),
+            this.brokerController.getBrokerConfig().getBrokerClusterName() + "_" + MixAll.REPLY_TOPIC_POSTFIX);
         if (this.brokerController.getBrokerConfig().isTraceTopicEnable()) {
             systemTopicSet.add(this.brokerController.getBrokerConfig().getMsgTraceTopicName());
         }
+        when(handlerContext.channel()).thenReturn(channel);
+        when(channel.remoteAddress()).thenReturn(new InetSocketAddress("127.0.0.1", 12345));
+
+        topic = "FooBar" + System.nanoTime();
+        TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
+        topicConfigManager.updateTopicConfig(new TopicConfig(topic));
     }
 
     @Test
@@ -101,7 +129,7 @@ public class AdminBrokerProcessorTest {
         RemotingCommand request = createResumeCheckHalfMessageCommand();
         when(messageStore.selectOneMessageByOffset(any(Long.class))).thenReturn(createSelectMappedBufferResult());
         when(messageStore.putMessage(any(MessageExtBrokerInner.class))).thenReturn(new PutMessageResult
-                (PutMessageStatus.PUT_OK, new AppendMessageResult(AppendMessageStatus.PUT_OK)));
+            (PutMessageStatus.PUT_OK, new AppendMessageResult(AppendMessageStatus.PUT_OK)));
         RemotingCommand response = adminBrokerProcessor.processRequest(handlerContext, request);
         assertThat(response.getCode()).isEqualTo(ResponseCode.SUCCESS);
     }
@@ -111,7 +139,7 @@ public class AdminBrokerProcessorTest {
         RemotingCommand request = createResumeCheckHalfMessageCommand();
         when(messageStore.selectOneMessageByOffset(any(Long.class))).thenReturn(createSelectMappedBufferResult());
         when(messageStore.putMessage(any(MessageExtBrokerInner.class))).thenReturn(new PutMessageResult
-                (PutMessageStatus.UNKNOWN_ERROR, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
+            (PutMessageStatus.UNKNOWN_ERROR, new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR)));
         RemotingCommand response = adminBrokerProcessor.processRequest(handlerContext, request);
         assertThat(response.getCode()).isEqualTo(ResponseCode.SYSTEM_ERROR);
     }
@@ -154,6 +182,34 @@ public class AdminBrokerProcessorTest {
         RemotingCommand response = adminBrokerProcessor.processRequest(handlerContext, request);
         assertThat(response.getCode()).isEqualTo(ResponseCode.SUCCESS);
     }
+
+    @Test
+    public void testGetTopicConfig() throws Exception {
+        String topic = "foobar";
+        brokerController.getTopicConfigManager().updateTopicConfig(new TopicConfig(topic));
+
+        {
+            GetTopicConfigRequestHeader requestHeader = new GetTopicConfigRequestHeader();
+            requestHeader.setTopic(topic);
+            RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.GET_TOPIC_CONFIG, requestHeader);
+            request.makeCustomHeaderToNet();
+            RemotingCommand response = adminBrokerProcessor.processRequest(handlerContext, request);
+            assertThat(response.getCode()).isEqualTo(ResponseCode.SUCCESS);
+            assertThat(response.getBody()).isNotEmpty();
+        }
+        {
+            GetTopicConfigRequestHeader requestHeader = new GetTopicConfigRequestHeader();
+            requestHeader.setTopic("aaaaaaa");
+            RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.GET_TOPIC_CONFIG, requestHeader);
+            request.makeCustomHeaderToNet();
+            RemotingCommand response = adminBrokerProcessor.processRequest(handlerContext, request);
+            assertThat(response.getCode()).isEqualTo(ResponseCode.SYSTEM_ERROR);
+            assertThat(response.getRemark()).contains("No topic in this broker.");
+        }
+    }
+
+
+
 
     private RemotingCommand buildCreateTopicRequest(String topic) {
         CreateTopicRequestHeader requestHeader = new CreateTopicRequestHeader();

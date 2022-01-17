@@ -25,6 +25,7 @@ public class GetMessageResult {
 
     private final List<SelectMappedBufferResult> messageMapedList;
     private final List<ByteBuffer> messageBufferList;
+    private final List<Long> messageQueueOffset;
 
     private GetMessageStatus status;
     private long nextBeginOffset;
@@ -40,11 +41,13 @@ public class GetMessageResult {
     public GetMessageResult() {
         messageMapedList = new ArrayList<>(100);
         messageBufferList = new ArrayList<>(100);
+        messageQueueOffset = new ArrayList<>(100);
     }
 
     public GetMessageResult(int resultSize) {
         messageMapedList = new ArrayList<>(resultSize);
         messageBufferList = new ArrayList<>(resultSize);
+        messageQueueOffset = new ArrayList<>(resultSize);
     }
 
     public GetMessageStatus getStatus() {
@@ -95,6 +98,11 @@ public class GetMessageResult {
             mapedBuffer.getSize() / BrokerStatsManager.SIZE_PER_COUNT);
     }
 
+    public void addMessage(final SelectMappedBufferResult mapedBuffer, final long queueOffset) {
+        addMessage(mapedBuffer);
+        this.messageQueueOffset.add(queueOffset);
+    }
+
     public void release() {
         for (SelectMappedBufferResult select : this.messageMapedList) {
             select.release();
@@ -127,6 +135,10 @@ public class GetMessageResult {
 
     public void setMsgCount4Commercial(int msgCount4Commercial) {
         this.msgCount4Commercial = msgCount4Commercial;
+    }
+
+    public List<Long> getMessageQueueOffset() {
+        return messageQueueOffset;
     }
 
     @Override

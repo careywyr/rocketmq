@@ -58,8 +58,8 @@ public class MappedFileQueue {
     }
 
     public void checkSelf() {
-
-        if (!this.mappedFiles.isEmpty()) {
+        List<MappedFile> mappedFiles = new ArrayList<>(this.mappedFiles);
+        if (!mappedFiles.isEmpty()) {
             Iterator<MappedFile> iterator = mappedFiles.iterator();
             MappedFile pre = null;
             while (iterator.hasNext()) {
@@ -272,21 +272,8 @@ public class MappedFileQueue {
     }
 
     public MappedFile getLastMappedFile() {
-        MappedFile mappedFileLast = null;
-
-        while (!this.mappedFiles.isEmpty()) {
-            try {
-                mappedFileLast = this.mappedFiles.get(this.mappedFiles.size() - 1);
-                break;
-            } catch (IndexOutOfBoundsException e) {
-                //continue;
-            } catch (Exception e) {
-                log.error("getLastMappedFile has exception.", e);
-                break;
-            }
-        }
-
-        return mappedFileLast;
+        MappedFile[] mappedFiles = this.mappedFiles.toArray(new MappedFile[0]);
+        return mappedFiles.length == 0 ? null : mappedFiles[mappedFiles.length - 1];
     }
 
     /**
@@ -391,7 +378,11 @@ public class MappedFileQueue {
     public int deleteExpiredFileByTime(final long expiredTime,
         final int deleteFilesInterval,
         final long intervalForcibly,
-        final boolean cleanImmediately) {
+        final boolean cleanImmediately,
+        int deleteFileBatchMax) {
+        if (deleteFileBatchMax == 0) {
+            deleteFileBatchMax = DELETE_FILES_BATCH_MAX;
+        }
         Object[] mfs = this.copyMappedFiles(0);
 
         if (null == mfs)
@@ -409,7 +400,7 @@ public class MappedFileQueue {
                         files.add(mappedFile);
                         deleteCount++;
 
-                        if (files.size() >= DELETE_FILES_BATCH_MAX) {
+                        if (files.size() >= deleteFileBatchMax) {
                             break;
                         }
 

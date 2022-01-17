@@ -23,6 +23,9 @@ package org.apache.rocketmq.common.protocol.route;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+
+import org.apache.rocketmq.common.statictopic.TopicQueueMappingInfo;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 
 public class TopicRouteData extends RemotingSerializable {
@@ -30,27 +33,33 @@ public class TopicRouteData extends RemotingSerializable {
     private List<QueueData> queueDatas;
     private List<BrokerData> brokerDatas;
     private HashMap<String/* brokerAddr */, List<String>/* Filter Server */> filterServerTable;
+    //It could be null or empty
+    private Map<String/*brokerName*/, TopicQueueMappingInfo> topicQueueMappingByBroker;
 
-    public TopicRouteData cloneTopicRouteData() {
-        TopicRouteData topicRouteData = new TopicRouteData();
-        topicRouteData.setQueueDatas(new ArrayList<QueueData>());
-        topicRouteData.setBrokerDatas(new ArrayList<BrokerData>());
-        topicRouteData.setFilterServerTable(new HashMap<String, List<String>>());
-        topicRouteData.setOrderTopicConf(this.orderTopicConf);
+    public TopicRouteData() {
+    }
 
-        if (this.queueDatas != null) {
-            topicRouteData.getQueueDatas().addAll(this.queueDatas);
+    public TopicRouteData(TopicRouteData topicRouteData) {
+        this.queueDatas = new ArrayList<QueueData>();
+        this.brokerDatas = new ArrayList<BrokerData>();
+        this.filterServerTable = new HashMap<String, List<String>>();
+        this.orderTopicConf = topicRouteData.orderTopicConf;
+
+        if (topicRouteData.queueDatas != null) {
+            this.queueDatas.addAll(topicRouteData.queueDatas);
         }
 
-        if (this.brokerDatas != null) {
-            topicRouteData.getBrokerDatas().addAll(this.brokerDatas);
+        if (topicRouteData.brokerDatas != null) {
+            this.brokerDatas.addAll(topicRouteData.brokerDatas);
         }
 
-        if (this.filterServerTable != null) {
-            topicRouteData.getFilterServerTable().putAll(this.filterServerTable);
+        if (topicRouteData.filterServerTable != null) {
+            this.filterServerTable.putAll(topicRouteData.filterServerTable);
         }
 
-        return topicRouteData;
+        if (topicRouteData.topicQueueMappingByBroker != null) {
+            this.topicQueueMappingByBroker = new HashMap<String, TopicQueueMappingInfo>(topicRouteData.topicQueueMappingByBroker);
+        }
     }
 
     public List<QueueData> getQueueDatas() {
@@ -85,6 +94,14 @@ public class TopicRouteData extends RemotingSerializable {
         this.orderTopicConf = orderTopicConf;
     }
 
+    public Map<String, TopicQueueMappingInfo> getTopicQueueMappingByBroker() {
+        return topicQueueMappingByBroker;
+    }
+
+    public void setTopicQueueMappingByBroker(Map<String, TopicQueueMappingInfo> topicQueueMappingByBroker) {
+        this.topicQueueMappingByBroker = topicQueueMappingByBroker;
+    }
+
     @Override
     public int hashCode() {
         final int prime = 31;
@@ -93,6 +110,7 @@ public class TopicRouteData extends RemotingSerializable {
         result = prime * result + ((orderTopicConf == null) ? 0 : orderTopicConf.hashCode());
         result = prime * result + ((queueDatas == null) ? 0 : queueDatas.hashCode());
         result = prime * result + ((filterServerTable == null) ? 0 : filterServerTable.hashCode());
+        result = prime * result + ((topicQueueMappingByBroker == null) ? 0 : topicQueueMappingByBroker.hashCode());
         return result;
     }
 
@@ -125,12 +143,17 @@ public class TopicRouteData extends RemotingSerializable {
                 return false;
         } else if (!filterServerTable.equals(other.filterServerTable))
             return false;
+        if (topicQueueMappingByBroker == null) {
+            if (other.topicQueueMappingByBroker != null)
+                return false;
+        } else if (!topicQueueMappingByBroker.equals(other.topicQueueMappingByBroker))
+            return false;
         return true;
     }
 
     @Override
     public String toString() {
         return "TopicRouteData [orderTopicConf=" + orderTopicConf + ", queueDatas=" + queueDatas
-            + ", brokerDatas=" + brokerDatas + ", filterServerTable=" + filterServerTable + "]";
+            + ", brokerDatas=" + brokerDatas + ", filterServerTable=" + filterServerTable + ", topicQueueMappingInfoTable=" + topicQueueMappingByBroker + "]";
     }
 }

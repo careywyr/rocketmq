@@ -21,8 +21,6 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.FileRegion;
-import java.nio.ByteBuffer;
-import java.util.List;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
 import org.apache.rocketmq.broker.filter.ConsumerFilterData;
@@ -43,12 +41,19 @@ import org.apache.rocketmq.common.filter.FilterAPI;
 import org.apache.rocketmq.common.help.FAQUrl;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageQueue;
+import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
 import org.apache.rocketmq.common.protocol.header.PullMessageResponseHeader;
 import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
 import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.common.protocol.topic.OffsetMovedEvent;
+import org.apache.rocketmq.common.rpc.RpcClientUtils;
+import org.apache.rocketmq.common.rpc.RpcRequest;
+import org.apache.rocketmq.common.rpc.RpcResponse;
+import org.apache.rocketmq.common.statictopic.LogicQueueMappingItem;
+import org.apache.rocketmq.common.statictopic.TopicQueueMappingContext;
+import org.apache.rocketmq.common.statictopic.TopicQueueMappingDetail;
 import org.apache.rocketmq.common.subscription.SubscriptionGroupConfig;
 import org.apache.rocketmq.common.sysflag.MessageSysFlag;
 import org.apache.rocketmq.common.sysflag.PullSysFlag;
@@ -69,6 +74,11 @@ import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.config.BrokerRole;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 
+import java.nio.ByteBuffer;
+import java.util.List;
+
+import static org.apache.rocketmq.remoting.protocol.RemotingCommand.buildErrorResponse;
+
 public class PullMessageProcessor extends AsyncNettyRequestProcessor implements NettyRequestProcessor {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
     private final BrokerController brokerController;
@@ -88,6 +98,100 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
     public boolean rejectRequest() {
         return false;
     }
+
+
+
+    private RemotingCommand rewriteRequestForStaticTopic(PullMessageRequestHeader requestHeader, TopicQueueMappingContext mappingContext) {
+        try {
+            if (mappingContext.getMappingDetail() == null) {
+                return null;
+            }
+            TopicQueueMappingDetail mappingDetail =  mappingContext.getMappingDetail();
+            String topic = mappingContext.getTopic();
+            Integer globalId = mappingContext.getGlobalId();
+            Long globalOffset = mappingContext.getGlobalOffset();
+
+            LogicQueueMappingItem mappingItem = mappingContext.getMappingItem();
+            if (mappingItem == null) {
+                return buildErrorResponse(ResponseCode.NOT_LEADER_FOR_QUEUE, String.format("%s-%d cannot find mapping item in request process of current broker %s", topic, globalId, mappingDetail.getBname()));
+            }
+
+            //TODO Check if the leader? consider the order consumer, which will lock the mq
+            //
+
+            if (globalOffset < mappingItem.getLogicOffset()) {
+                //handleOffsetMoved
+                //If the physical queue is reused, we should handle the PULL_OFFSET_MOVED independently
+                //Otherwise, we could just transfer it to the physical process
+            }
+            //below are physical info
+            String bname = mappingItem.getBname();
+            Integer phyQueueId = mappingItem.getQueueId();
+            Long phyQueueOffset = mappingItem.computePhysicalQueueOffset(globalOffset);
+            requestHeader.setQueueId(phyQueueId);
+            requestHeader.setQueueOffset(phyQueueOffset);
+            if (mappingItem.checkIfEndOffsetDecided()
+                    && requestHeader.getMaxMsgNums() != null) {
+                requestHeader.setMaxMsgNums((int) Math.min(mappingItem.getEndOffset() - mappingItem.getStartOffset(), requestHeader.getMaxMsgNums()));
+            }
+
+            if (mappingDetail.getBname().equals(bname)) {
+                //just let it go, do the local pull process
+                return null;
+            }
+
+            requestHeader.setPhysical(true);
+            requestHeader.setBname(bname);
+            RpcRequest rpcRequest = new RpcRequest(RequestCode.PULL_MESSAGE, requestHeader, null);
+            RpcResponse rpcResponse = this.brokerController.getBrokerOuterAPI().getRpcClient().invoke(rpcRequest, this.brokerController.getBrokerConfig().getForwardTimeout()).get();
+            if (rpcResponse.getException() != null) {
+                throw rpcResponse.getException();
+            }
+
+            PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) rpcResponse.getHeader();
+            {
+                RemotingCommand rewriteResult =  rewriteResponseForStaticTopic(requestHeader, responseHeader, mappingContext);
+                if (rewriteResult != null) {
+                    return rewriteResult;
+                }
+            }
+            return RpcClientUtils.createCommandForRpcResponse(rpcResponse);
+        } catch (Throwable t) {
+            return buildErrorResponse(ResponseCode.SYSTEM_ERROR, t.getMessage());
+        }
+    }
+
+    private RemotingCommand rewriteResponseForStaticTopic(PullMessageRequestHeader requestHeader, PullMessageResponseHeader responseHeader, TopicQueueMappingContext mappingContext) {
+        try {
+            if (mappingContext == null) {
+                return null;
+            }
+            TopicQueueMappingDetail mappingDetail = mappingContext.getMappingDetail();
+            LogicQueueMappingItem mappingItem = mappingContext.getMappingItem();
+            //handle nextBeginOffset
+            {
+                long nextBeginOffset = responseHeader.getNextBeginOffset();
+                assert nextBeginOffset >= requestHeader.getQueueOffset();
+                //the next begin offset should no more than the end offset
+                if (mappingItem.checkIfEndOffsetDecided()
+                        && nextBeginOffset >= mappingItem.getEndOffset()) {
+                    nextBeginOffset = mappingItem.getEndOffset();
+                }
+                responseHeader.setNextBeginOffset(mappingItem.computeStaticQueueOffsetUpToEnd(nextBeginOffset));
+            }
+            //handle min offset
+            responseHeader.setMinOffset(mappingItem.computeStaticQueueOffsetUpToEnd(Math.max(mappingItem.getStartOffset(), responseHeader.getMinOffset())));
+            //handle max offset
+            responseHeader.setMaxOffset(Math.max(mappingItem.computeStaticQueueOffsetUpToEnd(responseHeader.getMaxOffset()),
+                    TopicQueueMappingDetail.computeMaxOffsetFromMapping(mappingDetail, mappingContext.getGlobalId())));
+            //set the offsetDelta
+            responseHeader.setOffsetDelta(mappingItem.computeOffsetDelta());
+        } catch (Throwable t) {
+            return buildErrorResponse(ResponseCode.SYSTEM_ERROR, t.getMessage());
+        }
+        return null;
+    }
+
 
     private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend)
         throws RemotingCommandException {
@@ -138,6 +242,15 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("the topic[" + requestHeader.getTopic() + "] pulling message is forbidden");
             return response;
+        }
+
+        TopicQueueMappingContext mappingContext = this.brokerController.getTopicQueueMappingManager().buildTopicQueueMappingContext(requestHeader, false, requestHeader.getQueueOffset());
+
+        {
+            RemotingCommand rewriteResult = rewriteRequestForStaticTopic(requestHeader, mappingContext);
+            if (rewriteResult != null) {
+                return rewriteResult;
+            }
         }
 
         if (requestHeader.getQueueId() < 0 || requestHeader.getQueueId() >= topicConfig.getReadQueueNums()) {
@@ -243,6 +356,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             response.setRemark(getMessageResult.getStatus().name());
             responseHeader.setNextBeginOffset(getMessageResult.getNextBeginOffset());
             responseHeader.setMinOffset(getMessageResult.getMinOffset());
+            // this does not need to be modified since it's not an accurate value under logical queue.
             responseHeader.setMaxOffset(getMessageResult.getMaxOffset());
 
             if (getMessageResult.isSuggestPullingFromSlave()) {
@@ -325,6 +439,15 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                     assert false;
                     break;
             }
+
+            //rewrite the response for the
+            {
+                RemotingCommand rewriteResult =  rewriteResponseForStaticTopic(requestHeader, responseHeader, mappingContext);
+                if (rewriteResult != null) {
+                    return rewriteResult;
+                }
+            }
+
 
             if (this.hasConsumeMessageHook()) {
                 ConsumeMessageContext context = new ConsumeMessageContext();

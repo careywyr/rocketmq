@@ -20,10 +20,10 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageExtBatch;
 import org.apache.rocketmq.store.config.BrokerRole;
+import org.apache.rocketmq.store.schedule.ScheduleMessageService;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 
 /**
@@ -114,6 +114,16 @@ public interface MessageStore {
      * @return Maximum offset at present.
      */
     long getMaxOffsetInQueue(final String topic, final int queueId);
+
+    /**
+     * Get maximum offset of the topic queue.
+     *
+     * @param topic Topic name.
+     * @param queueId Queue ID.
+     * @param committed If only count committed
+     * @return Maximum offset at present.
+     */
+    long getMaxOffsetInQueue(final String topic, final int queueId, final boolean committed);
 
     /**
      * Get the minimum offset of the topic queue.
@@ -384,6 +394,8 @@ public interface MessageStore {
      * @return Consume queue.
      */
     ConsumeQueue getConsumeQueue(String topic, int queueId);
+
+    ScheduleMessageService getScheduleMessageService();
 
     /**
      * Get BrokerStatsManager of the messageStore.

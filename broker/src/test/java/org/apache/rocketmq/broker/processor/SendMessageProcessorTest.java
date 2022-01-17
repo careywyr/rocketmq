@@ -23,6 +23,8 @@ import org.apache.rocketmq.broker.mqtrace.SendMessageContext;
 import org.apache.rocketmq.broker.mqtrace.SendMessageHook;
 import org.apache.rocketmq.broker.transaction.TransactionalMessageService;
 import org.apache.rocketmq.common.BrokerConfig;
+import org.apache.rocketmq.common.TopicConfig;
+import org.apache.rocketmq.common.constant.PermName;
 import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -90,6 +92,8 @@ public class SendMessageProcessorTest {
         when(handlerContext.channel()).thenReturn(mockChannel);
         when(messageStore.lookMessageByOffset(anyLong())).thenReturn(new MessageExt());
         sendMessageProcessor = new SendMessageProcessor(brokerController);
+
+        brokerController.getTopicConfigManager().updateTopicConfig(new TopicConfig(topic, 8, 8, PermName.PERM_WRITE|PermName.PERM_READ));
     }
 
     @Test

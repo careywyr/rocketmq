@@ -23,6 +23,9 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
+
+import com.alibaba.fastjson.JSON;
+import com.google.common.collect.ImmutableList;
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -119,7 +122,8 @@ public class UtilAllTest {
         String comma = ",";
         assertEquals("groupA=DENY,groupB=PUB|SUB,groupC=SUB", UtilAll.join(list, comma));
         assertEquals(null, UtilAll.join(null, comma));
-        assertEquals("", UtilAll.join(Collections.emptyList(), comma));
+        List<String> objects = Collections.emptyList();
+        assertEquals("", UtilAll.join(objects, comma));
     }
 
     static class DemoConfig {
